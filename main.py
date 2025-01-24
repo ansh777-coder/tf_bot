@@ -1,5 +1,5 @@
 from twilio.rest import Client
-from flask import Flask, request, Response, jsonify
+from flask import Flask, request, Response, jsonify, render_template
 from twilio.twiml.messaging_response import MessagingResponse
 import logging
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -31,10 +31,10 @@ if not os.path.exists(CSV_FILE):
 # Employee tracking
 responded_employees = set()
 out_time_responses = {}
-employee_reminder_times = {}  # Track the time when the last reminder was sent
+employee_reminder_times = {}
 
 # Employee phone numbers
-EMPLOYEES = ['whatsapp:mobile1','whatsapp:+mobile2']
+EMPLOYEES = ['whatsapp:mobile1', 'whatsapp:+mobile2']
 
 # Function to log data to CSV
 def log_to_csv(phone_number, date, in_time="", out_time="", present="", leave="", leave_reason=""):
@@ -76,7 +76,7 @@ def send_reminder(reminder_type):
                 from_="whatsapp:+14155238886",
                 to=employee
             )
-            employee_reminder_times[employee] = datetime.now()  # Store the time when the reminder was sent
+            employee_reminder_times[employee] = datetime.now()
             logging.info(f"Attendance reminder sent to {employee}. SID: {message.sid}")
 
         elif reminder_type == 'out_time' and employee not in out_time_responses.get(employee, []):
@@ -85,47 +85,32 @@ def send_reminder(reminder_type):
                 from_="whatsapp:+14155238886",
                 to=employee
             )
-            employee_reminder_times[employee] = datetime.now()  # Store the time when the reminder was sent
+            employee_reminder_times[employee] = datetime.now()
             logging.info(f"Out-time reminder sent to {employee}. SID: {message.sid}")
 
-# Block reminders on sunday 
+# Block reminders on Sunday
 @app.before_request
 def block_on_sunday():
     if datetime.now().strftime('%A') == 'Sunday':
         return jsonify({"message": "The service is unavailable on Sundays. Please come back tomorrow."}), 503
 
-# Simple home route to confirm the app is working
-# @app.route("/")
-# def home():
-#     return "App is working!"
-
 # Handle incoming WhatsApp messages
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_reply():
-    # Get the incoming message and sender
     incoming_msg = request.form.get("Body")
     employee = request.form.get("From")
     
     if not incoming_msg or not employee:
         logging.error("Missing 'Body' or 'From' in the request.")
-        return "Missing 'Body' or 'From' in the request.", 400  # Return Bad Request error if missing
+        return "Missing 'Body' or 'From' in the request.", 400
     
-    incoming_msg = incoming_msg.strip()  # Strip leading/trailing spaces
-
+    incoming_msg = incoming_msg.strip()
     today_date = datetime.now().strftime('%Y-%m-%d')
     response = MessagingResponse()
 
-    # Check if the employee's last reminder was within the last 24 hours
-    last_reminder_time = employee_reminder_times.get(employee)
-    if last_reminder_time and datetime.now() - last_reminder_time > timedelta(hours=24):
-        response.message("❌ Your reminder has expired. Please wait for the next reminder.")
-        return Response(str(response), mimetype="application/xml")
-
     # Handle Present (P) with in_time
     if incoming_msg.lower().startswith('p') and employee not in responded_employees:
-        in_time_input = incoming_msg[2:].strip()  # Capture everything after 'P'
-        
-        # Validate the in_time format using regex (e.g., 9:00 AM or 10:30 PM)
+        in_time_input = incoming_msg[2:].strip()
         if re.match(r'^\d{1,2}:\d{2}\s?(am|pm|AM|PM)$', in_time_input):
             responded_employees.add(employee)
             log_to_csv(employee, today_date, in_time=in_time_input, present='Yes')
@@ -148,23 +133,32 @@ def whatsapp_reply():
     # Handle Out Time
     elif incoming_msg.lower().startswith('out_time'):
         out_time = incoming_msg[8:].strip()
-        if re.match(r'^\d{1,2}:\d{2}\s?(am|pm|AM|PM)$', out_time):  # Validate time format
+        if re.match(r'^\d{1,2}:\d{2}\s?(am|pm|AM|PM)$', out_time):
             log_to_csv(employee, today_date, out_time=out_time)
             response.message(f"✅ Thanks for marking your out time: {out_time}. Have a good evening!")
         else:
             response.message("⚠️ Invalid format. Please type 'out_time' followed by the time, e.g., 'out_time 6:00 PM'.")
             return Response(str(response), mimetype="application/xml")
 
-    # Unknown or Invalid Input
     else:
         response.message("❓ Sorry, I didn't understand that. Use:\n- 'P <time>' for present (e.g., 'P 9:00 AM')\n- 'L <reason>' for leave (e.g., 'L I am sick')\n- 'out_time <time>' to mark out time (e.g., 'out_time 6:00 PM').")
 
     return Response(str(response), mimetype="application/xml")
 
+# Route to display the attendance table
+@app.route("/attendance", methods=["GET"])
+def attendance_table():
+    if not os.path.exists(CSV_FILE):
+        return "No attendance data available."
+
+    with open(CSV_FILE, mode='r') as file:
+        rows = list(csv.reader(file))
+
+    headers = rows.pop(0)  # First row as headers
+    return render_template('attendance.html', headers=headers, rows=rows)
 
 # Main function
 if __name__ == "__main__":
-    # Set up the scheduler to send reminders
     scheduler = BackgroundScheduler()
     scheduler.add_job(send_reminder, 'cron', hour=17, minute=00, args=['attendance'], id='attendance_9_30')
     scheduler.add_job(send_reminder, 'cron', hour=18, minute=00, args=['attendance'], id='attendance_11_30')
@@ -174,7 +168,7 @@ if __name__ == "__main__":
 
     try:
         logging.info("Starting Flask server...")
-        port = int(os.environ.get("PORT", 5000))  # Get the port from environment or default to 5000
+        port = int(os.environ.get("PORT", 5000))
         app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     except (KeyboardInterrupt, SystemExit):
         pass
